@@ -11,6 +11,7 @@ from torch_geometric.data import HeteroData
 
 from app.modeling.loader import GraphPackage, NodeIndex
 from app.modeling.models import BaselineScorer, GNNLinkPredictor, compute_gene_prior
+from app.modeling.scoring import pairs_to_index_tensors
 
 
 @dataclass
@@ -49,21 +50,6 @@ class _BestCheckpoint:
         return patience is not None and self.epochs_since_improvement >= patience
 
 
-def _pairs_to_index_tensors(
-    pairs: list[tuple[str, str]],
-    disease_index: dict[str, int],
-    gene_index: dict[str, int],
-) -> tuple[torch.LongTensor, torch.LongTensor]:
-    """Convert (disease_id, gene_id) pairs to parallel LongTensors of positions."""
-    disease_idx = torch.tensor(
-        [disease_index[disease_id] for disease_id, _gene_id in pairs], dtype=torch.long
-    )
-    gene_idx = torch.tensor(
-        [gene_index[gene_id] for _disease_id, gene_id in pairs], dtype=torch.long
-    )
-    return disease_idx, gene_idx
-
-
 def _build_pair_batch(
     package: GraphPackage, split: str
 ) -> tuple[torch.LongTensor, torch.LongTensor, torch.Tensor]:
@@ -80,8 +66,8 @@ def _build_pair_batch(
             "which would otherwise silently corrupt early stopping)"
         )
 
-    pos_disease_idx, pos_gene_idx = _pairs_to_index_tensors(positives, disease_index, gene_index)
-    neg_disease_idx, neg_gene_idx = _pairs_to_index_tensors(negatives, disease_index, gene_index)
+    pos_disease_idx, pos_gene_idx = pairs_to_index_tensors(positives, disease_index, gene_index)
+    neg_disease_idx, neg_gene_idx = pairs_to_index_tensors(negatives, disease_index, gene_index)
 
     disease_idx = torch.cat([pos_disease_idx, neg_disease_idx])
     gene_idx = torch.cat([pos_gene_idx, neg_gene_idx])
@@ -261,8 +247,8 @@ def build_gnn_epoch_batch(
 
     disease_index = package.node_indexes["Disease"].index
     gene_index = package.node_indexes["Gene"].index
-    pos_disease_idx, pos_gene_idx = _pairs_to_index_tensors(supervision, disease_index, gene_index)
-    neg_disease_idx, neg_gene_idx = _pairs_to_index_tensors(negatives, disease_index, gene_index)
+    pos_disease_idx, pos_gene_idx = pairs_to_index_tensors(supervision, disease_index, gene_index)
+    neg_disease_idx, neg_gene_idx = pairs_to_index_tensors(negatives, disease_index, gene_index)
 
     return GNNEpochBatch(
         message_data=remove_dg_edges(package.data, package.node_indexes, supervision),
