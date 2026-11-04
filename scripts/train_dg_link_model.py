@@ -26,10 +26,13 @@ import torch
 
 from app.modeling.evaluate import (
     DEFAULT_CANDIDATE_POOL_SIZE,
+    DEFAULT_NUM_DISEASES,
     CandidateSubsetMetrics,
     EvaluationReport,
+    MultiDiseaseCandidateMetrics,
     evaluate_candidate_subset_ranking,
     evaluate_link_prediction,
+    evaluate_multi_disease_candidate_pool,
 )
 from app.modeling.loader import GraphPackage, load_graph_package
 from app.modeling.models import BaselineScorer, GNNLinkPredictor
@@ -98,6 +101,10 @@ def _candidate_subset_to_dict(metrics: CandidateSubsetMetrics) -> dict:
     return dataclasses.asdict(metrics)
 
 
+def _multi_disease_candidate_pool_to_dict(metrics: MultiDiseaseCandidateMetrics) -> dict:
+    return dataclasses.asdict(metrics)
+
+
 def _check_no_clobber(paths: list[Path], *, overwrite: bool) -> None:
     if overwrite:
         return
@@ -153,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
             "candidate_subset report section (models ranking a small, "
             "already-connected gene set per disease rather than the full "
             "gene universe)"
+        ),
+    )
+    parser.add_argument(
+        "--num-candidate-diseases",
+        type=int,
+        default=DEFAULT_NUM_DISEASES,
+        help=(
+            "number of 'Top-N' predicted diseases whose known genes are unioned "
+            "into the multi_disease_candidate_pool report section's candidate "
+            "pool (models the service's disease TOP-N -> gene TOP-K pipeline; "
+            "since this package carries no disease-ranking signal, the "
+            "(N - 1) non-true diseases are a random stand-in, not a real "
+            "prediction -- see evaluate_multi_disease_candidate_pool)"
         ),
     )
     parser.add_argument(
@@ -252,6 +272,52 @@ def main(argv: list[str] | None = None) -> int:
                         gnn_score_pair,
                         package,
                         "test",
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+            },
+        },
+        "multi_disease_candidate_pool": {
+            "baseline": {
+                "validation": _multi_disease_candidate_pool_to_dict(
+                    evaluate_multi_disease_candidate_pool(
+                        baseline_score_pair,
+                        package,
+                        "validation",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+                "test": _multi_disease_candidate_pool_to_dict(
+                    evaluate_multi_disease_candidate_pool(
+                        baseline_score_pair,
+                        package,
+                        "test",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+            },
+            "gnn": {
+                "validation": _multi_disease_candidate_pool_to_dict(
+                    evaluate_multi_disease_candidate_pool(
+                        gnn_score_pair,
+                        package,
+                        "validation",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+                "test": _multi_disease_candidate_pool_to_dict(
+                    evaluate_multi_disease_candidate_pool(
+                        gnn_score_pair,
+                        package,
+                        "test",
+                        num_diseases=args.num_candidate_diseases,
                         pool_size=args.candidate_pool_size,
                         seed=args.seed,
                     )

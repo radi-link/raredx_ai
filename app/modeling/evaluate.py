@@ -46,6 +46,7 @@ GENE_TYPE = "Gene"
 HITS_KS: tuple[int, ...] = (1, 10, 50)
 CANDIDATE_SUBSET_HITS_KS: tuple[int, ...] = (1, 3, 10)
 DEFAULT_CANDIDATE_POOL_SIZE = 10
+DEFAULT_NUM_DISEASES = 3
 
 
 @dataclass
@@ -75,6 +76,30 @@ class CandidateSubsetMetrics:
     mrr: float
     count: int
     mean_known_candidates: float
+
+
+@dataclass
+class MultiDiseaseCandidateMetrics:
+    """End-to-end disease(Top-N)->gene(Top-``pool_size``) pipeline metrics.
+
+    See ``evaluate_multi_disease_candidate_pool``. Unlike ``CandidateSubsetMetrics``
+    (one known disease, true gene always kept in the pool), this models the
+    service's actual Stage A+B+C risk: the true gene can be dropped by Stage B's
+    pool-size cutoff, not just left unranked. A dropped pair contributes 0 to
+    every Hits@K and to MRR -- ``count`` is every evaluated pair, not just the
+    survivors -- matching how an end-to-end miss would show up in the live
+    service. ``pool_recall`` isolates how often Stage B alone drops the true
+    gene; ``mean_pool_size`` is the average raw union size before truncation
+    or padding.
+    """
+
+    hits_at_1: float
+    hits_at_3: float
+    hits_at_10: float
+    mrr: float
+    count: int
+    pool_recall: float
+    mean_pool_size: float
 
 
 @dataclass
@@ -172,6 +197,17 @@ def _ordered_pool(rankable: Iterable[str], excluded: set[str], true_id: str) -> 
     return sorted(node_id for node_id in rankable if node_id not in excluded and node_id != true_id)
 
 
+def _known_associations(package: GraphPackage) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Known (disease, gene) associations across ALL splits, indexed both ways."""
+    genes_by_disease: dict[str, set[str]] = defaultdict(set)
+    diseases_by_gene: dict[str, set[str]] = defaultdict(set)
+    for split_pairs in package.positives.values():
+        for disease_id, gene_id in split_pairs:
+            genes_by_disease[disease_id].add(gene_id)
+            diseases_by_gene[gene_id].add(disease_id)
+    return genes_by_disease, diseases_by_gene
+
+
 def evaluate_link_prediction(
     score_pair: ScorePairFn, package: GraphPackage, split: str
 ) -> EvaluationReport:
@@ -188,13 +224,7 @@ def evaluate_link_prediction(
     """
     eval_pairs = package.positives[split]
 
-    # Known positives across ALL splits, indexed by the fixed side.
-    genes_by_disease: dict[str, set[str]] = defaultdict(set)
-    diseases_by_gene: dict[str, set[str]] = defaultdict(set)
-    for split_pairs in package.positives.values():
-        for disease_id, gene_id in split_pairs:
-            genes_by_disease[disease_id].add(gene_id)
-            diseases_by_gene[gene_id].add(disease_id)
+    genes_by_disease, diseases_by_gene = _known_associations(package)
 
     rankable_genes = package.node_indexes[GENE_TYPE].rankable
     rankable_diseases = package.node_indexes[DISEASE_TYPE].rankable
@@ -307,10 +337,7 @@ def evaluate_candidate_subset_ranking(
 
     eval_pairs = package.positives[split]
 
-    genes_by_disease: dict[str, set[str]] = defaultdict(set)
-    for split_pairs in package.positives.values():
-        for disease_id, gene_id in split_pairs:
-            genes_by_disease[disease_id].add(gene_id)
+    genes_by_disease, _diseases_by_gene = _known_associations(package)
 
     rankable_genes = sorted(package.node_indexes[GENE_TYPE].rankable)
     rng = random.Random(seed)
@@ -340,3 +367,134 @@ def evaluate_candidate_subset_ranking(
         known_counts.append(len(known))
 
     return _candidate_subset_metrics_from_ranks(ranks, known_counts)
+
+
+def evaluate_multi_disease_candidate_pool(
+    score_pair: ScorePairFn,
+    package: GraphPackage,
+    split: str,
+    *,
+    num_diseases: int = DEFAULT_NUM_DISEASES,
+    pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
+    seed: int = 42,
+) -> MultiDiseaseCandidateMetrics:
+    """Rank the true gene within a pool unioned from several ("Top-N") diseases.
+
+    Models Stage B + Stage C of the service's disease->gene pipeline: collect
+    candidate genes from the Top-``num_diseases`` predicted diseases, dedupe,
+    cut to ``pool_size``, then rank. Stage A itself (symptoms -> Top-N disease
+    prediction) is NOT modeled here -- this package carries no phenotype or
+    disease-ranking signal, so the true disease's ``num_diseases - 1`` "Top-N
+    companions" are a deterministic random sample of other rankable diseases,
+    standing in for Stage A's output noise rather than a real disease ranker.
+
+    For each positive pair:
+
+    1. Build ``disease_ids`` = {true disease} plus ``num_diseases - 1`` random
+       other rankable diseases (seeded).
+    2. Union their known genes (any split) into the raw candidate pool and
+       record its size (``mean_pool_size``).
+    3. If that union is larger than ``pool_size``, cut it to the ``pool_size``
+       genes with the most known disease associations (a connectivity proxy
+       standing in for the evidence-score cutoff Stage B hasn't defined yet;
+       ties broken by gene id). The true gene competes for a slot like any
+       other -- if it is cut, this pair is a Stage B miss.
+    4. Otherwise, pad the union up to ``pool_size`` with a deterministic random
+       sample of other rankable genes (same semantics as
+       ``evaluate_candidate_subset_ranking``); the true gene always survives
+       this branch since it is a member of its own disease's known genes.
+    5. If the true gene survived, score the final pool with ``score_pair`` and
+       record its rank; if not, no call is made and the pair counts as a miss.
+
+    Hits@1/3/10 and MRR are averaged over every positive pair in ``split``
+    (``count``), not just the survivors: a Stage B miss contributes 0 to each,
+    matching how an end-to-end service failure would be scored.
+    ``pool_recall`` reports the fraction of pairs where the true gene survived
+    Stage B's cutoff -- a diagnostic for Stage B alone.
+
+    Raises:
+        KeyError: if ``split`` is not a key of ``package.positives``.
+        ValueError: if ``pool_size`` or ``num_diseases`` is less than 1, or if
+            ``score_pair`` returns the wrong number of scores or any
+            non-finite score.
+    """
+    if pool_size < 1:
+        raise ValueError(f"pool_size must be >= 1, got {pool_size}")
+    if num_diseases < 1:
+        raise ValueError(f"num_diseases must be >= 1, got {num_diseases}")
+
+    eval_pairs = package.positives[split]
+
+    genes_by_disease, diseases_by_gene = _known_associations(package)
+    connectivity = {gene: len(diseases) for gene, diseases in diseases_by_gene.items()}
+
+    rankable_diseases = sorted(package.node_indexes[DISEASE_TYPE].rankable)
+    rankable_genes = sorted(package.node_indexes[GENE_TYPE].rankable)
+    rng = random.Random(seed)
+
+    ranks: list[float | None] = []
+    survived_flags: list[bool] = []
+    pool_sizes_raw: list[int] = []
+
+    for disease_id, gene_id in eval_pairs:
+        true_pair = (disease_id, gene_id)
+
+        other_diseases = [d for d in rankable_diseases if d != disease_id]
+        companions = rng.sample(other_diseases, min(num_diseases - 1, len(other_diseases)))
+        disease_ids = [disease_id, *companions]
+
+        union_genes: set[str] = set()
+        for candidate_disease in disease_ids:
+            union_genes |= genes_by_disease[candidate_disease]
+        pool_sizes_raw.append(len(union_genes))
+
+        if len(union_genes) > pool_size:
+            ranked_union = sorted(
+                union_genes, key=lambda gene: (-connectivity.get(gene, 0), gene)
+            )
+            final_pool = ranked_union[:pool_size]
+        else:
+            final_pool = sorted(union_genes)
+            needed = pool_size - len(final_pool)
+            if needed > 0:
+                exclude = union_genes | {gene_id}
+                fill_universe = [g for g in rankable_genes if g not in exclude]
+                final_pool += rng.sample(fill_universe, min(needed, len(fill_universe)))
+
+        survived = gene_id in final_pool
+        survived_flags.append(survived)
+
+        if not survived:
+            ranks.append(None)
+            continue
+
+        candidates = [g for g in final_pool if g != gene_id]
+        rank = _score_rank(
+            score_pair,
+            [true_pair] + [(disease_id, candidate) for candidate in candidates],
+            "multi_disease_candidate_pool",
+            true_pair,
+        )
+        ranks.append(rank)
+
+    total = len(eval_pairs)
+    if total == 0:
+        return MultiDiseaseCandidateMetrics(
+            hits_at_1=0.0, hits_at_3=0.0, hits_at_10=0.0, mrr=0.0, count=0,
+            pool_recall=0.0, mean_pool_size=0.0,
+        )
+
+    finite_ranks = [rank for rank in ranks if rank is not None]
+    hits = {
+        k: sum(1 for rank in finite_ranks if rank <= k) / total for k in CANDIDATE_SUBSET_HITS_KS
+    }
+    mrr = sum(1.0 / rank for rank in finite_ranks) / total
+    return MultiDiseaseCandidateMetrics(
+        hits_at_1=hits[1],
+        hits_at_3=hits[3],
+        hits_at_10=hits[10],
+        mrr=mrr,
+        count=total,
+        pool_recall=sum(survived_flags) / total,
+        mean_pool_size=sum(pool_sizes_raw) / total,
+    )

@@ -9,9 +9,11 @@ import pytest
 from app.modeling.evaluate import (
     CandidateSubsetMetrics,
     EvaluationReport,
+    MultiDiseaseCandidateMetrics,
     RankingMetrics,
     evaluate_candidate_subset_ranking,
     evaluate_link_prediction,
+    evaluate_multi_disease_candidate_pool,
 )
 from app.modeling.loader import (
     GraphPackage,
@@ -493,3 +495,112 @@ def test_candidate_subset_unknown_split_raises() -> None:
     package = load_graph_package(FIXTURE_DIR, seed=42)
     with pytest.raises(KeyError):
         evaluate_candidate_subset_ranking(RecordingScorer(), package, "holdout")
+
+
+# --- multi-disease candidate pool (Stage A+B+C end-to-end stand-in) ----------
+#
+# Fixture genes-by-disease (all splits): ORPHA:1 -> {HGNC:1, HGNC:5},
+# ORPHA:2 -> {HGNC:2, HGNC:3}, ORPHA:3 -> {HGNC:3}, ORPHA:4 -> {HGNC:4}.
+# Gene connectivity (# known diseases): HGNC:1=1, HGNC:2=1, HGNC:3=2 (ORPHA:2
+# and ORPHA:3), HGNC:4=1, HGNC:5=1. Rankable genes: HGNC:1-4.
+
+
+def test_multi_disease_single_disease_pool_matches_known_genes() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+    # num_diseases=1 means no Top-N companions; same union as the
+    # candidate-subset pool for ORPHA:2 alone: {HGNC:2, HGNC:3}.
+    evaluate_multi_disease_candidate_pool(
+        scorer, package, "validation", num_diseases=1, pool_size=2
+    )
+    assert len(scorer.batches) == 1
+    assert sorted(scorer.batches[0]) == [("ORPHA:2", "HGNC:2"), ("ORPHA:2", "HGNC:3")]
+
+
+def test_multi_disease_pads_with_rankable_genes_when_union_is_small() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+    evaluate_multi_disease_candidate_pool(
+        scorer, package, "validation", num_diseases=1, pool_size=4, seed=42
+    )
+    batch = scorer.batches[0]
+    assert len(batch) == 4
+    assert ("ORPHA:2", "HGNC:3") in batch
+    padded = {gene for _, gene in batch} - {"HGNC:2", "HGNC:3"}
+    assert padded <= {"HGNC:1", "HGNC:4"}
+    assert len(padded) == 2
+
+
+def test_multi_disease_truncation_can_drop_true_gene_as_stage_b_miss() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+    # num_diseases=4 unions every disease's known genes into one pool of 5
+    # ({HGNC:1..5}); pool_size=1 keeps only the top-connectivity gene,
+    # HGNC:3 (connectivity 2). Of the 4 train pairs, only (ORPHA:3, HGNC:3)
+    # survives -- the other 3 are Stage B misses and never reach score_pair.
+    metrics = evaluate_multi_disease_candidate_pool(
+        scorer, package, "train", num_diseases=4, pool_size=1
+    )
+    assert metrics.count == 4
+    assert metrics.pool_recall == 0.25
+    assert metrics.mean_pool_size == 5.0
+    assert metrics.hits_at_1 == 0.25
+    assert metrics.hits_at_3 == 0.25
+    assert metrics.hits_at_10 == 0.25
+    assert metrics.mrr == 0.25
+    assert scorer.batches == [[("ORPHA:3", "HGNC:3")]]
+
+
+def test_multi_disease_padding_is_deterministic_for_fixed_seed() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer_a, scorer_b = RecordingScorer(), RecordingScorer()
+    evaluate_multi_disease_candidate_pool(scorer_a, package, "test", pool_size=4, seed=7)
+    evaluate_multi_disease_candidate_pool(scorer_b, package, "test", pool_size=4, seed=7)
+    assert scorer_a.batches == scorer_b.batches
+
+
+def test_multi_disease_perfect_scorer_ranks_true_gene_first_when_no_truncation() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    true_pairs = set(package.positives["validation"])
+
+    def perfect(pairs: list[Pair]) -> list[float]:
+        return [10.0 if pair in true_pairs else -10.0 for pair in pairs]
+
+    # Default pool_size=10 never truncates this 5-gene universe, so every
+    # pair survives Stage B.
+    metrics = evaluate_multi_disease_candidate_pool(perfect, package, "validation")
+    assert metrics.pool_recall == 1.0
+    assert metrics.hits_at_1 == 1.0
+    assert metrics.mrr == 1.0
+
+
+def test_multi_disease_rejects_non_positive_pool_size() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    with pytest.raises(ValueError):
+        evaluate_multi_disease_candidate_pool(
+            RecordingScorer(), package, "validation", pool_size=0
+        )
+
+
+def test_multi_disease_rejects_non_positive_num_diseases() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    with pytest.raises(ValueError):
+        evaluate_multi_disease_candidate_pool(
+            RecordingScorer(), package, "validation", num_diseases=0
+        )
+
+
+def test_multi_disease_empty_split_reports_zero_count() -> None:
+    empty_package = load_graph_package(FIXTURE_DIR, seed=42)
+    empty_package.positives["validation"] = []
+    metrics = evaluate_multi_disease_candidate_pool(RecordingScorer(), empty_package, "validation")
+    assert metrics == MultiDiseaseCandidateMetrics(
+        hits_at_1=0.0, hits_at_3=0.0, hits_at_10=0.0, mrr=0.0, count=0,
+        pool_recall=0.0, mean_pool_size=0.0,
+    )
+
+
+def test_multi_disease_unknown_split_raises() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    with pytest.raises(KeyError):
+        evaluate_multi_disease_candidate_pool(RecordingScorer(), package, "holdout")
