@@ -1,0 +1,9 @@
+<JDBOR date="2025-01-01" version="synthetic"><DisorderList>
+<Disorder><OrphaCode>1</OrphaCode><Name>Synthetic disease A</Name><DisorderGeneAssociationList>
+<DisorderGeneAssociation><Gene id="g1"><Symbol>GENEA</Symbol><Name>Synthetic gene A</Name><ExternalReferenceList><ExternalReference><Source>HGNC</Source><Reference>10</Reference></ExternalReference><ExternalReference><Source>Entrez</Source><Reference>101</Reference></ExternalReference></ExternalReferenceList></Gene><DisorderGeneAssociationType><Name>Disease-causing germline mutation(s) in</Name></DisorderGeneAssociationType><DisorderGeneAssociationStatus><Name>Assessed</Name></DisorderGeneAssociationStatus><SourceOfValidation>PMID:synthetic1</SourceOfValidation></DisorderGeneAssociation>
+<DisorderGeneAssociation><Gene id="g1"><Symbol>GENEA</Symbol><Name>Synthetic gene A</Name><ExternalReferenceList><ExternalReference><Source>HGNC</Source><Reference>10</Reference></ExternalReference></ExternalReferenceList></Gene><DisorderGeneAssociationType><Name>Major susceptibility factor in</Name></DisorderGeneAssociationType><DisorderGeneAssociationStatus><Name>Assessed</Name></DisorderGeneAssociationStatus><SourceOfValidation>PMID:synthetic2</SourceOfValidation></DisorderGeneAssociation>
+</DisorderGeneAssociationList></Disorder>
+<Disorder><OrphaCode>8</OrphaCode><Name>Gene only</Name><DisorderGeneAssociationList>
+<DisorderGeneAssociation><Gene id="g2"><Symbol>LOCUSX</Symbol><Name>Synthetic unresolved locus</Name></Gene><DisorderGeneAssociationType><Name>Candidate gene tested in</Name></DisorderGeneAssociationType><DisorderGeneAssociationStatus><Name>Not assessed</Name></DisorderGeneAssociationStatus></DisorderGeneAssociation>
+</DisorderGeneAssociationList></Disorder>
+</DisorderList></JDBOR>

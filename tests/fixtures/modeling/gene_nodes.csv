@@ -1,0 +1,6 @@
+node_id,node_type,name,canonical_status,gene_symbol,gene_symbols_source,gene_names,rankable,source_gene_keys,gene_xrefs,source_database,resolution_basis
+HGNC:1,Gene,Gene1,resolved,GENE1,"[""GENE1""]","[""gene 1""]",true,"[""1""]","{}","[""Orphanet""]",source_declared_hgnc
+HGNC:2,Gene,Gene2,resolved,GENE2,"[""GENE2""]","[""gene 2""]",true,"[""2""]","{}","[""Orphanet""]",source_declared_hgnc
+HGNC:3,Gene,Gene3,resolved,GENE3,"[""GENE3""]","[""gene 3""]",true,"[""3""]","{}","[""Orphanet""]",source_declared_hgnc
+HGNC:4,Gene,Gene4,resolved,GENE4,"[""GENE4""]","[""gene 4""]",true,"[""4""]","{}","[""Orphanet""]",source_declared_hgnc
+HGNC:5,Gene,Gene5,resolved,GENE5,"[""GENE5""]","[""gene 5""]",false,"[""5""]","{}","[""Orphanet""]",source_locus_fallback

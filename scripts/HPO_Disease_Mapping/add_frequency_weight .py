@@ -5,21 +5,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
-
 
 DEFAULT_INPUT = Path("data/processed/HPO_disease_mapping_baseline.csv")
 DEFAULT_OUTPUT = Path("data/processed/HPO_disease_mapping_with_frequency_weight.csv")
 OUTPUT_COLUMN = "frequency_weight"
 
-FREQUENCY_WEIGHTS = {
-    "Obligate (100%)": 1.0,
-    "Very frequent (99-80%)": 0.895,
-    "Frequent (79-30%)": 0.545,
-    "Occasional (29-5%)": 0.17,
-    "Very rare (<4-1%)": 0.025,
-    "Excluded (0%)": 0.0,
-}
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from app.etl.frequency import frequency_weight  # noqa: E402
 
 
 def add_frequency_weight(input_csv: Path, output_csv: Path, decimals: int) -> int:
@@ -41,10 +35,8 @@ def add_frequency_weight(input_csv: Path, output_csv: Path, decimals: int) -> in
 
             for row in reader:
                 frequency_label = row.get("frequency_label", "").strip()
-                if frequency_label not in FREQUENCY_WEIGHTS:
-                    raise ValueError(f"Unknown frequency label: {frequency_label!r}")
-
-                row[OUTPUT_COLUMN] = f"{FREQUENCY_WEIGHTS[frequency_label]:.{decimals}f}"
+                weight = frequency_weight(frequency_label)
+                row[OUTPUT_COLUMN] = "" if weight is None else f"{weight:.{decimals}f}"
                 writer.writerow(row)
                 row_count += 1
 

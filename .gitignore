@@ -84,3 +84,6 @@ data/external/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/external/.gitkeep
+
+# Generated modeling reports (keep the reports/ directory tracked, not its output)
+reports/*.json

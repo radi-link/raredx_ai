@@ -1,0 +1,5 @@
+node_id,node_type,name,canonical_status,source_names,xrefs
+ORPHA:1,Disease,Disease1,resolved,"[""Disease1""]",{}
+ORPHA:2,Disease,Disease2,resolved,"[""Disease2""]",{}
+ORPHA:3,Disease,Disease3,resolved,"[""Disease3""]",{}
+ORPHA:4,Disease,Disease4,resolved,"[""Disease4""]",{}
