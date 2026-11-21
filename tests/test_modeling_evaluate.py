@@ -676,6 +676,9 @@ def test_stage_a_connected_filters_duplicate_and_off_graph_diseases_without_back
 
 def test_stage_a_connected_ranks_gene_after_stage_a_miss_by_max_score() -> None:
     package = load_graph_package(FIXTURE_DIR, seed=42)
+    # Make HGNC:3 a real GraphPackage association for both predicted diseases,
+    # so max aggregation is exercised only across valid contributor contexts.
+    package.positives["train"].append(("ORPHA:4", "HGNC:3"))
 
     def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
         assert query == ["HP:0000002"]
@@ -684,17 +687,19 @@ def test_stage_a_connected_ranks_gene_after_stage_a_miss_by_max_score() -> None:
         # still contributes its true HGNC:3 gene to the Stage B union.
         return ["ORPHA:3", "ORPHA:4"]
 
+    scored_batches: list[list[Pair]] = []
+
     def scorer(pairs: list[Pair]) -> list[float]:
+        scored_batches.append(list(pairs))
         # Max aggregation makes HGNC:3 score 10 from ORPHA:3 rather than -100
-        # from ORPHA:4. Averaging its contexts would incorrectly rank it below
-        # HGNC:4, whose two contexts both score 9.
+        # from its other real contributor ORPHA:4. Averaging those contexts
+        # would incorrectly rank it below ORPHA:4's HGNC:4 score of 9.
         scores = {
             ("ORPHA:3", "HGNC:3"): 10.0,
             ("ORPHA:4", "HGNC:3"): -100.0,
-            ("ORPHA:3", "HGNC:4"): 9.0,
             ("ORPHA:4", "HGNC:4"): 9.0,
         }
-        return [scores.get(pair, 0.0) for pair in pairs]
+        return [scores[pair] for pair in pairs]
 
     metrics = evaluate_stage_a_connected_candidate_pool(
         scorer,
@@ -715,6 +720,82 @@ def test_stage_a_connected_ranks_gene_after_stage_a_miss_by_max_score() -> None:
     assert metrics.hits_at_3 == 1.0
     assert metrics.hits_at_10 == 1.0
     assert metrics.mrr == 1.0
+    assert scored_batches == [[
+        ("ORPHA:3", "HGNC:3"),
+        ("ORPHA:4", "HGNC:3"),
+        ("ORPHA:4", "HGNC:4"),
+    ]]
+
+
+def test_stage_a_connected_does_not_inflate_gene_from_unrelated_disease() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert query == ["HP:0000002"]
+        assert top_k == 2
+        # ORPHA:3 contributes the true HGNC:3 gene, while ORPHA:4 contributes
+        # only HGNC:4. The target disease ORPHA:2 intentionally misses Stage A.
+        return ["ORPHA:3", "ORPHA:4"]
+
+    def scorer(pairs: list[Pair]) -> list[float]:
+        scores = {
+            ("ORPHA:3", "HGNC:3"): 1.0,
+            # This high score is unrelated evidence: ORPHA:4 did not contribute
+            # HGNC:3 and therefore must not be allowed to inflate the gene's max.
+            ("ORPHA:4", "HGNC:3"): 100.0,
+            ("ORPHA:3", "HGNC:4"): 0.0,
+            ("ORPHA:4", "HGNC:4"): 2.0,
+        }
+        return [scores[pair] for pair in pairs]
+
+    metrics = evaluate_stage_a_connected_candidate_pool(
+        scorer,
+        package,
+        _stage_a_knowledge(),
+        stage_a_ranker,
+        "validation",
+        num_diseases=2,
+        pool_size=2,
+    )
+
+    # HGNC:3 survives through ORPHA:3 despite the Stage A disease miss, but it
+    # ranks below HGNC:4 when only real contributor contexts are scored.
+    assert metrics.stage_a_recall_at_n == 0.0
+    assert metrics.end_to_end_pool_recall == 1.0
+    assert metrics.hits_at_1 == 0.0
+    assert metrics.mrr == 0.5
+
+
+def test_stage_a_connected_scores_padding_only_gene_against_top_disease() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert query == ["HP:0000002"]
+        assert top_k == 2
+        return ["ORPHA:3", "ORPHA:4"]
+
+    evaluate_stage_a_connected_candidate_pool(
+        scorer,
+        package,
+        _stage_a_knowledge(),
+        stage_a_ranker,
+        "validation",
+        num_diseases=2,
+        pool_size=3,
+        seed=7,
+    )
+
+    assert len(scorer.batches) == 1
+    scored_pairs = scorer.batches[0]
+    padding_genes = {gene for _disease, gene in scored_pairs} - {"HGNC:3", "HGNC:4"}
+    assert len(padding_genes) == 1
+    padding_gene = padding_genes.pop()
+    assert set(scored_pairs) == {
+        ("ORPHA:3", "HGNC:3"),
+        ("ORPHA:4", "HGNC:4"),
+        ("ORPHA:3", padding_gene),
+    }
 
 
 def test_stage_a_connected_padding_is_stable_when_split_pair_order_changes() -> None:

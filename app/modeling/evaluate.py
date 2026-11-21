@@ -584,9 +584,11 @@ def evaluate_stage_a_connected_candidate_pool(
         disease_candidates = stage_a_candidates_by_disease[disease_id]
         stage_a_candidate_counts.append(len(disease_candidates))
 
-        union_genes: set[str] = set()
+        contributors_by_gene: dict[str, list[str]] = defaultdict(list)
         for candidate_disease in disease_candidates:
-            union_genes |= genes_by_disease[candidate_disease]
+            for candidate_gene in genes_by_disease[candidate_disease]:
+                contributors_by_gene[candidate_gene].append(candidate_disease)
+        union_genes = set(contributors_by_gene)
         raw_pool_sizes.append(len(union_genes))
 
         if len(union_genes) > pool_size:
@@ -609,11 +611,19 @@ def evaluate_stage_a_connected_candidate_pool(
         if not stage_b_hit:
             continue
 
-        contexts = [
-            (candidate_disease, candidate_gene)
-            for candidate_gene in final_pool
-            for candidate_disease in disease_candidates
-        ]
+        contexts: list[Pair] = []
+        for candidate_gene in final_pool:
+            contributor_diseases = contributors_by_gene.get(candidate_gene)
+            if contributor_diseases is not None:
+                contexts.extend(
+                    (candidate_disease, candidate_gene)
+                    for candidate_disease in contributor_diseases
+                )
+            else:
+                # Padding has no graph association to supply a disease context.
+                # Give it one deterministic context: the highest-ranked aligned
+                # Stage A disease, rather than every predicted disease.
+                contexts.append((disease_candidates[0], candidate_gene))
         scores = score_pair(contexts)
         if len(scores) != len(contexts):
             raise ValueError(

@@ -11,6 +11,11 @@ import torch
 from scripts.train_dg_link_model import main
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "modeling"
+STAGE_A_LIMITATION = (
+    "The synthetic query is derived from the same processed Disease-HPO reference "
+    "knowledge used by the IC ranker, so this diagnostic does not measure independent "
+    "patient generalization."
+)
 
 
 def _write_stage_a_processed_store(processed_dir: Path) -> None:
@@ -132,7 +137,18 @@ def test_cli_writes_ic_stage_a_connected_metrics_and_limitations(tmp_path: Path)
     assert metadata["method"] == "ic"
     assert metadata["aggregation"] == "max_predicted_disease_score"
     assert metadata["query_protocol"] == "synthetic_processed_disease_hpo_profile"
-    assert "not an independent clinical benchmark" in metadata["limitation"]
+    assert metadata["limitation"] == STAGE_A_LIMITATION
+
+
+def test_cli_help_discloses_stage_a_synthetic_query_boundary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    normalized_help = " ".join(capsys.readouterr().out.split())
+    assert STAGE_A_LIMITATION in normalized_help
 
 
 def test_cli_rejects_stage_a_method_without_processed_dir(tmp_path: Path) -> None:

@@ -45,6 +45,11 @@ from app.retrieval.knowledge import KnowledgeIndex
 
 Pair = tuple[str, str]
 ScorePairFn = Callable[[list[Pair]], list[float]]
+STAGE_A_LIMITATION = (
+    "The synthetic query is derived from the same processed Disease-HPO reference "
+    "knowledge used by the IC ranker, so this diagnostic does not measure independent "
+    "patient generalization."
+)
 
 
 def _baseline_score_pair(model: BaselineScorer, package: GraphPackage) -> ScorePairFn:
@@ -198,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help=(
             "processed knowledge-store directory for the opt-in internal synthetic "
-            "Stage A-connected candidate-pool diagnostic"
+            f"Stage A-connected candidate-pool diagnostic. {STAGE_A_LIMITATION}"
         ),
     )
     parser.add_argument(
@@ -370,9 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                 "method": args.stage_a_method or "ic",
                 "aggregation": "max_predicted_disease_score",
                 "query_protocol": "synthetic_processed_disease_hpo_profile",
-                "limitation": (
-                    "Internal synthetic diagnostic; not an independent clinical benchmark."
-                ),
+                "limitation": STAGE_A_LIMITATION,
             }
         }
         report["stage_a_connected_candidate_pool"] = {
