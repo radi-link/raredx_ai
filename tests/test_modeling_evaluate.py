@@ -674,21 +674,25 @@ def test_stage_a_connected_filters_duplicate_and_off_graph_diseases_without_back
     assert scorer.batches == [[("ORPHA:2", "HGNC:2"), ("ORPHA:2", "HGNC:3")]]
 
 
-def test_stage_a_connected_ranks_gene_from_non_true_predicted_disease_by_max_score() -> None:
+def test_stage_a_connected_ranks_gene_after_stage_a_miss_by_max_score() -> None:
     package = load_graph_package(FIXTURE_DIR, seed=42)
 
     def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
         assert query == ["HP:0000002"]
         assert top_k == 2
-        return ["ORPHA:3", "ORPHA:2"]
+        # ORPHA:2 is the target disease but is intentionally absent. ORPHA:3
+        # still contributes its true HGNC:3 gene to the Stage B union.
+        return ["ORPHA:3", "ORPHA:4"]
 
     def scorer(pairs: list[Pair]) -> list[float]:
-        # HGNC:3 is the true gene. Its ORPHA:3 context wins with score 10,
-        # even though ORPHA:2 is the true disease and its HGNC:2 context scores 9.
+        # Max aggregation makes HGNC:3 score 10 from ORPHA:3 rather than -100
+        # from ORPHA:4. Averaging its contexts would incorrectly rank it below
+        # HGNC:4, whose two contexts both score 9.
         scores = {
             ("ORPHA:3", "HGNC:3"): 10.0,
-            ("ORPHA:2", "HGNC:3"): 1.0,
-            ("ORPHA:2", "HGNC:2"): 9.0,
+            ("ORPHA:4", "HGNC:3"): -100.0,
+            ("ORPHA:3", "HGNC:4"): 9.0,
+            ("ORPHA:4", "HGNC:4"): 9.0,
         }
         return [scores.get(pair, 0.0) for pair in pairs]
 
@@ -704,13 +708,68 @@ def test_stage_a_connected_ranks_gene_from_non_true_predicted_disease_by_max_sco
 
     assert metrics.count == 1
     assert metrics.skipped_no_query_count == 0
-    assert metrics.stage_a_recall_at_n == 1.0
-    assert metrics.stage_b_recall_given_stage_a == 1.0
+    assert metrics.stage_a_recall_at_n == 0.0
+    assert metrics.stage_b_recall_given_stage_a == 0.0
     assert metrics.end_to_end_pool_recall == 1.0
     assert metrics.hits_at_1 == 1.0
     assert metrics.hits_at_3 == 1.0
     assert metrics.hits_at_10 == 1.0
     assert metrics.mrr == 1.0
+
+
+def test_stage_a_connected_padding_is_stable_when_split_pair_order_changes() -> None:
+    first_package = load_graph_package(FIXTURE_DIR, seed=42)
+    second_package = load_graph_package(FIXTURE_DIR, seed=42)
+    pairs = [("ORPHA:1", "HGNC:1"), ("ORPHA:2", "HGNC:2")]
+    first_package.positives["validation"] = pairs
+    second_package.positives["validation"] = list(reversed(pairs))
+    knowledge = KnowledgeIndex(
+        KnowledgeBase(
+            phenotypes={
+                "HP:0000001": PhenotypeTerm(hpo_id="HP:0000001", name="Phenotype one"),
+                "HP:0000002": PhenotypeTerm(hpo_id="HP:0000002", name="Phenotype two"),
+            },
+            disease_phenotypes=[
+                DiseasePhenotypeAnnotation(
+                    disease_id="ORPHA:1", disease_name="Disease one", hpo_id="HP:0000001"
+                ),
+                DiseasePhenotypeAnnotation(
+                    disease_id="ORPHA:2", disease_name="Disease two", hpo_id="HP:0000002"
+                ),
+            ],
+            gene_phenotypes=[],
+        )
+    )
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert top_k == 1
+        return ["ORPHA:1" if query == ["HP:0000001"] else "ORPHA:2"]
+
+    first_scorer, second_scorer = RecordingScorer(), RecordingScorer()
+    evaluate_stage_a_connected_candidate_pool(
+        first_scorer,
+        first_package,
+        knowledge,
+        stage_a_ranker,
+        "validation",
+        num_diseases=1,
+        pool_size=4,
+        seed=7,
+    )
+    evaluate_stage_a_connected_candidate_pool(
+        second_scorer,
+        second_package,
+        knowledge,
+        stage_a_ranker,
+        "validation",
+        num_diseases=1,
+        pool_size=4,
+        seed=7,
+    )
+
+    first_batches = {batch[0][0]: batch for batch in first_scorer.batches}
+    second_batches = {batch[0][0]: batch for batch in second_scorer.batches}
+    assert first_batches == second_batches
 
 
 def test_stage_a_connected_records_stage_b_miss_after_stage_a_hit() -> None:
