@@ -30,13 +30,18 @@ from app.modeling.evaluate import (
     CandidateSubsetMetrics,
     EvaluationReport,
     MultiDiseaseCandidateMetrics,
+    StageAConnectedCandidateMetrics,
     evaluate_candidate_subset_ranking,
     evaluate_link_prediction,
     evaluate_multi_disease_candidate_pool,
+    evaluate_stage_a_connected_candidate_pool,
 )
+from app.etl.processed_store import load_processed_knowledge_base
 from app.modeling.loader import GraphPackage, load_graph_package
 from app.modeling.models import BaselineScorer, GNNLinkPredictor
 from app.modeling.train import train_baseline, train_gnn
+from app.retrieval.ic_baseline import ICBaselineRanker
+from app.retrieval.knowledge import KnowledgeIndex
 
 Pair = tuple[str, str]
 ScorePairFn = Callable[[list[Pair]], list[float]]
@@ -103,6 +108,19 @@ def _candidate_subset_to_dict(metrics: CandidateSubsetMetrics) -> dict:
 
 def _multi_disease_candidate_pool_to_dict(metrics: MultiDiseaseCandidateMetrics) -> dict:
     return dataclasses.asdict(metrics)
+
+
+def _stage_a_connected_candidate_pool_to_dict(metrics: StageAConnectedCandidateMetrics) -> dict:
+    return dataclasses.asdict(metrics)
+
+
+def _ic_stage_a_ranker(ranker: ICBaselineRanker) -> Callable[[list[str], int], list[str]]:
+    """Adapt IC candidate objects to the Stage A evaluator's disease-ID contract."""
+
+    def rank_disease_ids(hpo_terms: list[str], top_k: int) -> list[str]:
+        return [candidate.disease_id for candidate in ranker.rank(hpo_terms, top_k)]
+
+    return rank_disease_ids
 
 
 def _check_no_clobber(paths: list[Path], *, overwrite: bool) -> None:
@@ -176,11 +194,26 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--stage-a-processed-dir",
+        type=Path,
+        help=(
+            "processed knowledge-store directory for the opt-in internal synthetic "
+            "Stage A-connected candidate-pool diagnostic"
+        ),
+    )
+    parser.add_argument(
+        "--stage-a-method",
+        choices=("ic",),
+        help="Stage A ranker for the opt-in diagnostic; requires --stage-a-processed-dir",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="allow overwriting an existing report or checkpoint at the output paths",
     )
     args = parser.parse_args(argv)
+    if args.stage_a_method is not None and args.stage_a_processed_dir is None:
+        raise ValueError("--stage-a-method requires --stage-a-processed-dir")
     patience = None if args.patience <= 0 else args.patience
 
     baseline_checkpoint = args.model_dir / "baseline_state_dict.pt"
@@ -190,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     package = load_graph_package(args.graph_dir, seed=args.seed)
+    stage_a_knowledge: KnowledgeIndex | None = None
+    stage_a_rank_disease_ids: Callable[[list[str], int], list[str]] | None = None
+    if args.stage_a_processed_dir is not None:
+        stage_a_knowledge = KnowledgeIndex(load_processed_knowledge_base(args.stage_a_processed_dir))
+        stage_a_rank_disease_ids = _ic_stage_a_ranker(ICBaselineRanker(stage_a_knowledge))
 
     baseline_model, baseline_history = train_baseline(
         package,
@@ -325,6 +363,72 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
     }
+
+    if stage_a_knowledge is not None and stage_a_rank_disease_ids is not None:
+        report["config"] = {
+            "stage_a_connected_evaluation": {
+                "method": args.stage_a_method or "ic",
+                "aggregation": "max_predicted_disease_score",
+                "query_protocol": "synthetic_processed_disease_hpo_profile",
+                "limitation": (
+                    "Internal synthetic diagnostic; not an independent clinical benchmark."
+                ),
+            }
+        }
+        report["stage_a_connected_candidate_pool"] = {
+            "baseline": {
+                "validation": _stage_a_connected_candidate_pool_to_dict(
+                    evaluate_stage_a_connected_candidate_pool(
+                        baseline_score_pair,
+                        package,
+                        stage_a_knowledge,
+                        stage_a_rank_disease_ids,
+                        "validation",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+                "test": _stage_a_connected_candidate_pool_to_dict(
+                    evaluate_stage_a_connected_candidate_pool(
+                        baseline_score_pair,
+                        package,
+                        stage_a_knowledge,
+                        stage_a_rank_disease_ids,
+                        "test",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+            },
+            "gnn": {
+                "validation": _stage_a_connected_candidate_pool_to_dict(
+                    evaluate_stage_a_connected_candidate_pool(
+                        gnn_score_pair,
+                        package,
+                        stage_a_knowledge,
+                        stage_a_rank_disease_ids,
+                        "validation",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+                "test": _stage_a_connected_candidate_pool_to_dict(
+                    evaluate_stage_a_connected_candidate_pool(
+                        gnn_score_pair,
+                        package,
+                        stage_a_knowledge,
+                        stage_a_rank_disease_ids,
+                        "test",
+                        num_diseases=args.num_candidate_diseases,
+                        pool_size=args.candidate_pool_size,
+                        seed=args.seed,
+                    )
+                ),
+            },
+        }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
