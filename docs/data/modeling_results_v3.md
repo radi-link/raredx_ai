@@ -110,4 +110,18 @@ Gene은 오직 예측 대상인 바로 그 관계(Disease-Gene)로만 정보를 
 
 v1(`docs/data/modeling_results_v1.md`), v2 문서의 "읽는 법" 섹션이 그대로 적용됩니다. 체크포인트의 파라미터 이름이 `bilinear_weight` → `relation_weight`로 바뀌었으니, 과거 체크포인트(v1/v2)와 이번 체크포인트는 서로 `load_state_dict` 호환이 안 됩니다.
 
+### Stage A 연결 후보-pool 진단의 해석 경계
+
+Stage A 연결 평가는 증상에서 질병 Top-N을 찾는 IC ranker의 결과를 사용한다. 각 질병-HPO 프로필을 합성 질의로 구성하고, 그 질의의 IC Top-N 질병을 Stage A 출력으로 삼는다. 이어서 예측된 각 질병의 gene score를 gene별 최댓값으로 집계해 후보 pool을 만들고, 그 pool이 정답 gene을 유지하는지 측정한다.
+
+이 평가는 Stage A 오류가 후속 gene 후보 pool로 어떻게 전파되는지 확인하는 **내부 합성 진단**이다. 질의가 실제 임상 환자 표현형이 아니라 Disease-HPO 프로필에서 만들어지므로, 독립적인 임상 벤치마크나 실제 서비스의 임상 성능으로 해석해서는 안 된다.
+
+miss를 읽을 때는 다음 세 지표를 함께 본다.
+
+- `stage_a_recall_at_n`: 합성 질의의 정답 질병이 IC Stage A Top-N에 남았는지
+- `stage_b_recall_given_stage_a`: 정답 질병이 Stage A에 남은 경우, 후속 후보 pool이 정답 gene을 유지했는지
+- `end_to_end_pool_recall`: Stage A와 후속 후보-pool 단계를 모두 통과해 정답 gene이 최종 pool에 남았는지
+
+따라서 첫 지표의 하락은 Stage A 질병 검색 miss를, 두 번째 지표의 하락은 Stage A가 맞았을 때의 후보-pool miss를, 세 번째 지표의 하락은 전체 연결 흐름의 pool miss를 뜻한다.
+
 재현 코드·정책: 이 브랜치의 `app/modeling/`, `docs/superpowers/specs/2026-10-21-dg-link-prediction-modeling-design.md`.
