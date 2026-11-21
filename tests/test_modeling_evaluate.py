@@ -6,14 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from app.etl.models import DiseasePhenotypeAnnotation, KnowledgeBase, PhenotypeTerm
 from app.modeling.evaluate import (
     CandidateSubsetMetrics,
     EvaluationReport,
     MultiDiseaseCandidateMetrics,
     RankingMetrics,
+    StageAConnectedCandidateMetrics,
     evaluate_candidate_subset_ranking,
     evaluate_link_prediction,
     evaluate_multi_disease_candidate_pool,
+    evaluate_stage_a_connected_candidate_pool,
 )
 from app.modeling.loader import (
     GraphPackage,
@@ -21,6 +24,7 @@ from app.modeling.loader import (
     build_node_index,
     load_graph_package,
 )
+from app.retrieval.knowledge import KnowledgeIndex
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "modeling"
 
@@ -604,3 +608,169 @@ def test_multi_disease_unknown_split_raises() -> None:
     package = load_graph_package(FIXTURE_DIR, seed=42)
     with pytest.raises(KeyError):
         evaluate_multi_disease_candidate_pool(RecordingScorer(), package, "holdout")
+
+
+# --- Stage-A-connected candidate pool ----------------------------------------
+
+
+def _stage_a_knowledge(
+    *,
+    target_disease_id: str = "ORPHA:2",
+    target_phenotype_id: str = "HP:0000002",
+) -> KnowledgeIndex:
+    """Small processed-store-shaped knowledge index for one graph test target."""
+    return KnowledgeIndex(
+        KnowledgeBase(
+            phenotypes={
+                "HP:0000001": PhenotypeTerm(hpo_id="HP:0000001", name="Phenotype one"),
+                "HP:0000002": PhenotypeTerm(hpo_id="HP:0000002", name="Phenotype two"),
+            },
+            disease_phenotypes=[
+                DiseasePhenotypeAnnotation(
+                    disease_id=target_disease_id,
+                    disease_name="Target disease",
+                    hpo_id=target_phenotype_id,
+                )
+            ],
+            gene_phenotypes=[],
+        )
+    )
+
+
+def test_stage_a_connected_filters_duplicate_and_off_graph_diseases_without_backfill() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert query == ["HP:0000002"]
+        assert top_k == 3
+        # ORPHA:3 would only be available by incorrectly backfilling after the
+        # requested top three are aligned to the graph and deduplicated.
+        return ["OFF_GRAPH", "ORPHA:2", "ORPHA:2", "ORPHA:3"]
+
+    metrics = evaluate_stage_a_connected_candidate_pool(
+        scorer,
+        package,
+        _stage_a_knowledge(),
+        stage_a_ranker,
+        "validation",
+        num_diseases=3,
+        pool_size=2,
+    )
+
+    assert metrics == StageAConnectedCandidateMetrics(
+        hits_at_1=0.0,
+        hits_at_3=1.0,
+        hits_at_10=1.0,
+        mrr=pytest.approx(2.0 / 3.0),
+        count=1,
+        skipped_no_query_count=0,
+        stage_a_recall_at_n=1.0,
+        stage_b_recall_given_stage_a=1.0,
+        end_to_end_pool_recall=1.0,
+        mean_stage_a_candidate_count=1.0,
+        mean_pool_size=2.0,
+    )
+    assert scorer.batches == [[("ORPHA:2", "HGNC:2"), ("ORPHA:2", "HGNC:3")]]
+
+
+def test_stage_a_connected_ranks_gene_from_non_true_predicted_disease_by_max_score() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert query == ["HP:0000002"]
+        assert top_k == 2
+        return ["ORPHA:3", "ORPHA:2"]
+
+    def scorer(pairs: list[Pair]) -> list[float]:
+        # HGNC:3 is the true gene. Its ORPHA:3 context wins with score 10,
+        # even though ORPHA:2 is the true disease and its HGNC:2 context scores 9.
+        scores = {
+            ("ORPHA:3", "HGNC:3"): 10.0,
+            ("ORPHA:2", "HGNC:3"): 1.0,
+            ("ORPHA:2", "HGNC:2"): 9.0,
+        }
+        return [scores.get(pair, 0.0) for pair in pairs]
+
+    metrics = evaluate_stage_a_connected_candidate_pool(
+        scorer,
+        package,
+        _stage_a_knowledge(),
+        stage_a_ranker,
+        "validation",
+        num_diseases=2,
+        pool_size=2,
+    )
+
+    assert metrics.count == 1
+    assert metrics.skipped_no_query_count == 0
+    assert metrics.stage_a_recall_at_n == 1.0
+    assert metrics.stage_b_recall_given_stage_a == 1.0
+    assert metrics.end_to_end_pool_recall == 1.0
+    assert metrics.hits_at_1 == 1.0
+    assert metrics.hits_at_3 == 1.0
+    assert metrics.hits_at_10 == 1.0
+    assert metrics.mrr == 1.0
+
+
+def test_stage_a_connected_records_stage_b_miss_after_stage_a_hit() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    scorer = RecordingScorer()
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        assert query == ["HP:0000001"]
+        assert top_k == 3
+        return ["ORPHA:1", "ORPHA:2", "ORPHA:3"]
+
+    metrics = evaluate_stage_a_connected_candidate_pool(
+        scorer,
+        package,
+        _stage_a_knowledge(target_disease_id="ORPHA:1", target_phenotype_id="HP:0000001"),
+        stage_a_ranker,
+        "test",
+        num_diseases=3,
+        pool_size=1,
+    )
+
+    assert metrics.count == 1
+    assert metrics.skipped_no_query_count == 0
+    assert metrics.stage_a_recall_at_n == 1.0
+    assert metrics.stage_b_recall_given_stage_a == 0.0
+    assert metrics.end_to_end_pool_recall == 0.0
+    assert metrics.hits_at_1 == 0.0
+    assert metrics.hits_at_3 == 0.0
+    assert metrics.hits_at_10 == 0.0
+    assert metrics.mrr == 0.0
+    assert metrics.mean_stage_a_candidate_count == 3.0
+    assert metrics.mean_pool_size == 4.0
+    assert scorer.batches == []
+
+
+def test_stage_a_connected_skips_missing_phenotype_query() -> None:
+    package = load_graph_package(FIXTURE_DIR, seed=42)
+    ranker_calls: list[tuple[list[str], int]] = []
+
+    def stage_a_ranker(query: list[str], top_k: int) -> list[str]:
+        ranker_calls.append((query, top_k))
+        return ["ORPHA:2"]
+
+    metrics = evaluate_stage_a_connected_candidate_pool(
+        RecordingScorer(),
+        package,
+        _stage_a_knowledge(target_phenotype_id="HP:NOT_IN_KNOWLEDGE"),
+        stage_a_ranker,
+        "validation",
+    )
+
+    assert metrics.count == 0
+    assert metrics.skipped_no_query_count == 1
+    assert metrics.stage_a_recall_at_n == 0.0
+    assert metrics.stage_b_recall_given_stage_a == 0.0
+    assert metrics.end_to_end_pool_recall == 0.0
+    assert metrics.hits_at_1 == 0.0
+    assert metrics.hits_at_3 == 0.0
+    assert metrics.hits_at_10 == 0.0
+    assert metrics.mrr == 0.0
+    assert metrics.mean_stage_a_candidate_count == 0.0
+    assert metrics.mean_pool_size == 0.0
+    assert ranker_calls == []

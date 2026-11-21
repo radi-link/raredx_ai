@@ -33,13 +33,15 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from app.modeling.loader import GraphPackage
+from app.retrieval.knowledge import KnowledgeIndex
 
 Pair = tuple[str, str]
 ScorePairFn = Callable[[list[Pair]], list[float]]
+StageARanker = Callable[[list[str], int], Sequence[str]]
 
 DISEASE_TYPE = "Disease"
 GENE_TYPE = "Gene"
@@ -99,6 +101,28 @@ class MultiDiseaseCandidateMetrics:
     mrr: float
     count: int
     pool_recall: float
+    mean_pool_size: float
+
+
+@dataclass(frozen=True)
+class StageAConnectedCandidateMetrics:
+    """Diagnostic metrics for a real Stage A disease ranking plus Stages B/C.
+
+    ``count`` covers graph-split positives with a usable synthetic phenotype
+    query. A Stage A miss is tracked independently because another predicted
+    disease can still contribute the true gene to the Stage B pool.
+    """
+
+    hits_at_1: float
+    hits_at_3: float
+    hits_at_10: float
+    mrr: float
+    count: int
+    skipped_no_query_count: int
+    stage_a_recall_at_n: float
+    stage_b_recall_given_stage_a: float
+    end_to_end_pool_recall: float
+    mean_stage_a_candidate_count: float
     mean_pool_size: float
 
 
@@ -497,4 +521,153 @@ def evaluate_multi_disease_candidate_pool(
         count=total,
         pool_recall=sum(survived_flags) / total,
         mean_pool_size=sum(pool_sizes_raw) / total,
+    )
+
+
+def evaluate_stage_a_connected_candidate_pool(
+    score_pair: ScorePairFn,
+    package: GraphPackage,
+    knowledge: KnowledgeIndex,
+    stage_a_ranker: StageARanker,
+    split: str,
+    *,
+    num_diseases: int = DEFAULT_NUM_DISEASES,
+    pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
+    pool_strategy: str = "connectivity",
+    seed: int = 42,
+) -> StageAConnectedCandidateMetrics:
+    """Evaluate real Stage A disease IDs through Stage B pooling and Stage C ranking.
+
+    This is an internal synthetic diagnostic: each graph disease's processed
+    Disease-HPO profile is used as the Stage A query. It measures error
+    propagation through the pipeline, not independent clinical performance.
+    """
+    if pool_size < 1:
+        raise ValueError(f"pool_size must be >= 1, got {pool_size}")
+    if num_diseases < 1:
+        raise ValueError(f"num_diseases must be >= 1, got {num_diseases}")
+    if pool_strategy != "connectivity":
+        raise ValueError(f"unsupported pool_strategy: {pool_strategy}")
+
+    eval_pairs = package.positives[split]
+    genes_by_disease, diseases_by_gene = _known_associations(package)
+    connectivity = {gene: len(diseases) for gene, diseases in diseases_by_gene.items()}
+    rankable_diseases = set(package.node_indexes[DISEASE_TYPE].rankable)
+    rankable_genes = sorted(package.node_indexes[GENE_TYPE].rankable)
+
+    stage_a_candidates_by_disease: dict[str, list[str]] = {}
+    ranks: list[float] = []
+    stage_a_survived: list[bool] = []
+    stage_b_survived: list[bool] = []
+    stage_a_candidate_counts: list[int] = []
+    raw_pool_sizes: list[int] = []
+    skipped_no_query_count = 0
+
+    for disease_id, gene_id in eval_pairs:
+        profile = knowledge.disease_profiles.get(disease_id)
+        query = sorted(
+            profile.phenotype_ids.intersection(knowledge.phenotypes) if profile is not None else ()
+        )
+        if not query:
+            skipped_no_query_count += 1
+            continue
+
+        if disease_id not in stage_a_candidates_by_disease:
+            ranked_ids = stage_a_ranker(query, num_diseases)
+            aligned: list[str] = []
+            seen: set[str] = set()
+            for candidate_disease in ranked_ids[:num_diseases]:
+                if candidate_disease in rankable_diseases and candidate_disease not in seen:
+                    aligned.append(candidate_disease)
+                    seen.add(candidate_disease)
+            stage_a_candidates_by_disease[disease_id] = aligned
+        disease_candidates = stage_a_candidates_by_disease[disease_id]
+        stage_a_candidate_counts.append(len(disease_candidates))
+
+        union_genes: set[str] = set()
+        for candidate_disease in disease_candidates:
+            union_genes |= genes_by_disease[candidate_disease]
+        raw_pool_sizes.append(len(union_genes))
+
+        if len(union_genes) > pool_size:
+            final_pool = sorted(union_genes, key=lambda gene: (-connectivity.get(gene, 0), gene))[
+                :pool_size
+            ]
+        else:
+            final_pool = sorted(union_genes)
+            needed = pool_size - len(final_pool)
+            if needed > 0:
+                exclude = union_genes | {gene_id}
+                fill_universe = [gene for gene in rankable_genes if gene not in exclude]
+                pair_rng = random.Random(f"{seed}\x00{disease_id}\x00{gene_id}")
+                final_pool += pair_rng.sample(fill_universe, min(needed, len(fill_universe)))
+
+        stage_a_hit = disease_id in disease_candidates
+        stage_b_hit = gene_id in final_pool
+        stage_a_survived.append(stage_a_hit)
+        stage_b_survived.append(stage_b_hit)
+        if not stage_b_hit:
+            continue
+
+        contexts = [
+            (candidate_disease, candidate_gene)
+            for candidate_gene in final_pool
+            for candidate_disease in disease_candidates
+        ]
+        scores = score_pair(contexts)
+        if len(scores) != len(contexts):
+            raise ValueError(
+                "score_pair returned "
+                f"{len(scores)} scores for {len(contexts)} stage_a_connected_candidate_pool pairs"
+            )
+        if any(not math.isfinite(score) for score in scores):
+            raise ValueError("score_pair returned non-finite score for stage_a_connected_candidate_pool")
+
+        best_score_by_gene: dict[str, float] = {}
+        for (_candidate_disease, candidate_gene), score in zip(contexts, scores, strict=True):
+            best_score_by_gene[candidate_gene] = max(best_score_by_gene.get(candidate_gene, -math.inf), score)
+        rank_scores = [best_score_by_gene[gene_id]] + [
+            best_score_by_gene[candidate_gene]
+            for candidate_gene in final_pool
+            if candidate_gene != gene_id
+        ]
+        ranks.append(_mean_rank_of_first(rank_scores))
+
+    count = len(stage_a_survived)
+    if count == 0:
+        return StageAConnectedCandidateMetrics(
+            hits_at_1=0.0,
+            hits_at_3=0.0,
+            hits_at_10=0.0,
+            mrr=0.0,
+            count=0,
+            skipped_no_query_count=skipped_no_query_count,
+            stage_a_recall_at_n=0.0,
+            stage_b_recall_given_stage_a=0.0,
+            end_to_end_pool_recall=0.0,
+            mean_stage_a_candidate_count=0.0,
+            mean_pool_size=0.0,
+        )
+
+    stage_a_count = sum(stage_a_survived)
+    hits = {
+        k: sum(1 for rank in ranks if rank <= k) / count for k in CANDIDATE_SUBSET_HITS_KS
+    }
+    return StageAConnectedCandidateMetrics(
+        hits_at_1=hits[1],
+        hits_at_3=hits[3],
+        hits_at_10=hits[10],
+        mrr=sum(1.0 / rank for rank in ranks) / count,
+        count=count,
+        skipped_no_query_count=skipped_no_query_count,
+        stage_a_recall_at_n=stage_a_count / count,
+        stage_b_recall_given_stage_a=(
+            sum(a_hit and b_hit for a_hit, b_hit in zip(stage_a_survived, stage_b_survived, strict=True))
+            / stage_a_count
+            if stage_a_count
+            else 0.0
+        ),
+        end_to_end_pool_recall=sum(stage_b_survived) / count,
+        mean_stage_a_candidate_count=sum(stage_a_candidate_counts) / count,
+        mean_pool_size=sum(raw_pool_sizes) / count,
     )
