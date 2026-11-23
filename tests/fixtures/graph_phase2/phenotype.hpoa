@@ -1,0 +1,5 @@
+#version: synthetic
+ database_id	disease_name	qualifier	hpo_id	frequency	evidence	reference
+ORPHA:1	Synthetic disease A		HP:0000004	HP:0040282	TAS	PMID:synthetic3
+ORPHA:1	Synthetic disease A	NOT	HP:0000003		TAS	PMID:synthetic4
+OMIM:999	External disease		HP:0000002		TAS	PMID:synthetic5

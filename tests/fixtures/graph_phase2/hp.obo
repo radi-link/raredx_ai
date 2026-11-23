@@ -1,0 +1,41 @@
+format-version: 1.2
+data-version: synthetic/phase2
+
+[Term]
+id: HP:0000001
+name: Synthetic root
+
+[Term]
+id: HP:0000002
+name: Synthetic A
+alt_id: HP:0000022
+is_a: HP:0000001 ! Synthetic root
+
+[Term]
+id: HP:0000003
+name: Synthetic B
+is_a: HP:0000001 ! Synthetic root
+
+[Term]
+id: HP:0000004
+name: obsolete replacement
+is_obsolete: true
+replaced_by: HP:0000002
+
+[Term]
+id: HP:0000005
+name: obsolete ambiguous
+is_obsolete: true
+consider: HP:0000003
+
+[Term]
+id: HP:0000006
+name: obsolete cycle A
+is_obsolete: true
+replaced_by: HP:0000007
+
+[Term]
+id: HP:0000007
+name: obsolete cycle B
+is_obsolete: true
+replaced_by: HP:0000006

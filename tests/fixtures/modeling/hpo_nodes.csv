@@ -1,0 +1,4 @@
+node_id,node_type,name,canonical_status,definition,synonyms
+HP:0000001,Phenotype,Phenotype1,resolved,,[]
+HP:0000002,Phenotype,Phenotype2,resolved,,[]
+HP:0000003,Phenotype,Phenotype3,resolved,,[]

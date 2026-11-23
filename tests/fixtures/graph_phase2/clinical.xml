@@ -1,0 +1,8 @@
+<JDBOR date="2025-01-01" version="synthetic"><HPODisorderSetStatusList>
+<HPODisorderSetStatus><Disorder><OrphaCode>1</OrphaCode><Name>Synthetic disease A</Name><HPODisorderAssociationList>
+<HPODisorderAssociation><HPO><HPOId>HP:0000022</HPOId><HPOTerm>Synthetic A</HPOTerm></HPO><HPOFrequency><Name>Frequent (79-30%)</Name></HPOFrequency></HPODisorderAssociation>
+<HPODisorderAssociation><HPO><HPOId>HP:0000003</HPOId><HPOTerm>Synthetic B</HPOTerm></HPO><HPOFrequency><Name>Excluded (0%)</Name></HPOFrequency></HPODisorderAssociation>
+<HPODisorderAssociation><HPO><HPOId>HP:0000005</HPOId><HPOTerm>Ambiguous</HPOTerm></HPO></HPODisorderAssociation>
+</HPODisorderAssociationList></Disorder><ValidationStatus>Validated</ValidationStatus><Source>Synthetic publication</Source><ValidationDate>2025-01-01</ValidationDate></HPODisorderSetStatus>
+<HPODisorderSetStatus><Disorder><OrphaCode>9</OrphaCode><Name>Phenotype only</Name><HPODisorderAssociationList><HPODisorderAssociation><HPO><HPOId>HP:0000003</HPOId><HPOTerm>Synthetic B</HPOTerm></HPO></HPODisorderAssociation></HPODisorderAssociationList></Disorder></HPODisorderSetStatus>
+</HPODisorderSetStatusList></JDBOR>
